@@ -1,128 +1,429 @@
-# simulate_multi.py
-# Usage: python simulate_multi.py
-# Requires: requests
-# pip install requests
+#!/usr/bin/env python3
+"""
+Rate Limiter Load Simulator
+============================
+A sophisticated load testing tool for the Rate Limiter API with multiple traffic patterns,
+detailed statistics, and flexible configuration options.
+
+Usage:
+    python simulator_load.py --duration 120 --pattern steady
+    python simulator_load.py --config-file clients_config.json --output results.csv
+"""
 
 import requests
 import threading
 import time
 import random
+import argparse
+import json
+import os
+import sys
+import math
+from collections import defaultdict
+from datetime import datetime
 
-BASE_URL = "http://localhost:5000/api/data"   # change if needed
-# Replace these with real apiKeys created via POST /api/clients
-# Example: [{"name":"AppA","key":"abc123","rps":2,"burst_seconds":5,"burst_rps":10}, ...]
-clients = [
-    {"name": "8", "key": "a0fb564017e357d1ac5d0be097b3d2e8", "rps": 2, "burst_every": 30, "burst_rps": 8, "burst_duration": 5},
-    {"name": "9", "key": "a061a9cac58d1858499e458a8f029ebc", "rps": 1, "burst_every": 45, "burst_rps": 5, "burst_duration": 8},
-]
+# Try to import colorama for colored output
+try:
+    from colorama import init, Fore, Style
+    init(autoreset=True)
+    HAS_COLOR = True
+except ImportError:
+    HAS_COLOR = False
+    # Fallback if colorama not available
+    class Fore:
+        GREEN = RED = YELLOW = CYAN = MAGENTA = BLUE = WHITE = RESET = ''
+    class Style:
+        BRIGHT = RESET_ALL = ''
 
-RUN_SECONDS = 120  # total simulation duration
 
 class ClientSimulator(threading.Thread):
-    def __init__(self, cfg):
+    """Simulates a client making requests with configurable traffic patterns"""
+    
+    def __init__(self, config, base_url, pattern='steady', verbose=False):
         super().__init__()
-        self.cfg = cfg
+        self.config = config
+        self.base_url = base_url
+        self.pattern = pattern
+        self.verbose = verbose
         self.allowed = 0
         self.blocked = 0
         self.total = 0
+        self.latencies = []
         self.stop_event = threading.Event()
-
+        self.start_time = None
+        
     def run(self):
-        start = time.time()
-        next_burst = start + self.cfg.get("burst_every", 999999)
-        in_burst_until = 0
-
-        while time.time() - start < RUN_SECONDS and not self.stop_event.is_set():
-            now = time.time()
-            # determine current rps
-            if now < in_burst_until:
-                rps = self.cfg.get("burst_rps", self.cfg["rps"])
-            elif now >= next_burst:
-                # start burst
-                in_burst_until = now + self.cfg.get("burst_duration", 5)
-                next_burst = now + self.cfg.get("burst_every", 999999)
-                rps = self.cfg.get("burst_rps", self.cfg["rps"])
-            else:
-                rps = self.cfg["rps"]
-
-            # send rps requests in this second (simple approach)
-            interval = 1.0 / max(rps, 1)
-            send_until = time.time() + 1.0
-            while time.time() < send_until and not self.stop_event.is_set():
-                self.send_request()
-                time.sleep(interval)
-
-        print(f"[{self.cfg['name']}] finished. total={self.total} allowed={self.allowed} blocked={self.blocked}")
-
+        self.start_time = time.time()
+        duration = self.config.get('duration', 120)
+        
+        while time.time() - self.start_time < duration and not self.stop_event.is_set():
+            rps = self.calculate_rps()
+            self.send_burst(rps)
+            time.sleep(1)
+        
+        if self.verbose:
+            print(f"{Fore.CYAN}[{self.config['name']}] Finished. Total={self.total}, Allowed={self.allowed}, Blocked={self.blocked}")
+    
+    def calculate_rps(self):
+        """Calculate requests per second based on traffic pattern"""
+        elapsed = time.time() - self.start_time
+        base_rps = self.config.get('rps', 2)
+        
+        if self.pattern == 'steady':
+            return base_rps
+        
+        elif self.pattern == 'ramp-up':
+            # Gradually increase from base to 3x base
+            max_rps = base_rps * 3
+            progress = min(elapsed / 60.0, 1.0)  # Ramp over 60 seconds
+            return int(base_rps + (max_rps - base_rps) * progress)
+        
+        elif self.pattern == 'spike':
+            # Random spikes
+            if random.random() < 0.1:  # 10% chance of spike
+                return base_rps * random.randint(3, 6)
+            return base_rps
+        
+        elif self.pattern == 'wave':
+            # Sinusoidal pattern
+            wave = math.sin(elapsed / 10.0)  # Period of ~63 seconds
+            return int(base_rps + base_rps * wave)
+        
+        else:
+            return base_rps
+    
+    def send_burst(self, rps):
+        """Send a burst of requests for this second"""
+        if rps <= 0:
+            return
+        
+        interval = 1.0 / rps
+        # Add jitter (±20%)
+        jitter = random.uniform(0.8, 1.2)
+        interval *= jitter
+        
+        for _ in range(rps):
+            if self.stop_event.is_set():
+                break
+            self.send_request()
+            time.sleep(interval)
+    
     def send_request(self):
-        headers = {"x-api-key": self.cfg["key"]}
-        params = {"key": self.cfg["key"]}
+        """Send a single request and record statistics"""
+        headers = {"x-api-key": self.config["key"]}
+        
         try:
-            r = requests.get(BASE_URL, headers=headers, params=params,  timeout=5)
+            start = time.time()
+            r = requests.get(self.base_url, headers=headers, timeout=5)
+            latency = (time.time() - start) * 1000  # Convert to ms
+            
             self.total += 1
+            self.latencies.append(latency)
+            
             if r.status_code == 200:
                 self.allowed += 1
+                if self.verbose:
+                    print(f"{Fore.GREEN}[{self.config['name']}] ✓ Allowed ({latency:.1f}ms)")
             elif r.status_code == 429:
                 self.blocked += 1
+                if self.verbose:
+                    print(f"{Fore.RED}[{self.config['name']}] ✗ Blocked ({latency:.1f}ms)")
             else:
-                # treat other codes as blocked-ish, but print for debugging
-                print(f"[{self.cfg['name']}] unexpected status {r.status_code}: {r.text}")
+                if self.verbose:
+                    print(f"{Fore.YELLOW}[{self.config['name']}] ? Unexpected status {r.status_code}")
+        
+        except requests.exceptions.Timeout:
+            self.total += 1
+            if self.verbose:
+                print(f"{Fore.RED}[{self.config['name']}] ⏱ Timeout")
+        
         except Exception as e:
-            print(f"[{self.cfg['name']}] request error: {e}")
-
+            self.total += 1
+            if self.verbose:
+                print(f"{Fore.RED}[{self.config['name']}] ✗ Error: {e}")
+    
     def stop(self):
+        """Signal the thread to stop"""
         self.stop_event.set()
+    
+    def get_stats(self):
+        """Calculate and return statistics"""
+        if not self.latencies:
+            return {
+                'name': self.config['name'],
+                'total': self.total,
+                'allowed': self.allowed,
+                'blocked': self.blocked,
+                'success_rate': 0.0,
+                'avg_latency': 0.0,
+                'min_latency': 0.0,
+                'max_latency': 0.0,
+                'p95_latency': 0.0,
+                'p99_latency': 0.0,
+            }
+        
+        sorted_latencies = sorted(self.latencies)
+        n = len(sorted_latencies)
+        
+        return {
+            'name': self.config['name'],
+            'total': self.total,
+            'allowed': self.allowed,
+            'blocked': self.blocked,
+            'success_rate': (self.allowed / self.total * 100) if self.total > 0 else 0.0,
+            'avg_latency': sum(sorted_latencies) / n,
+            'min_latency': sorted_latencies[0],
+            'max_latency': sorted_latencies[-1],
+            'p95_latency': sorted_latencies[int(n * 0.95)],
+            'p99_latency': sorted_latencies[int(n * 0.99)],
+        }
 
-class Reporter(threading.Thread):
-    def __init__(self, threads, start_time):
+
+class ProgressReporter(threading.Thread):
+    """Reports progress in real-time"""
+    
+    def __init__(self, threads, duration):
         super().__init__()
         self.threads = threads
-        self.start_time = start_time
+        self.duration = duration
+        self.start_time = time.time()
         self.stop_event = threading.Event()
-
+    
     def run(self):
         while not self.stop_event.is_set():
             elapsed = time.time() - self.start_time
-            pct = min(int((elapsed / RUN_SECONDS) * 100), 100)
+            percent = min(int((elapsed / self.duration) * 100), 100)
+            
             total = sum(t.total for t in self.threads)
             allowed = sum(t.allowed for t in self.threads)
             blocked = sum(t.blocked for t in self.threads)
-            line = f"Progress: {pct:3d}% | total={total} allowed={allowed} blocked={blocked}"
-            print("\r" + line, end="", flush=True)
-            if elapsed >= RUN_SECONDS:
+            
+            # Calculate average RPS
+            rps = total / elapsed if elapsed > 0 else 0
+            
+            # Progress bar
+            bar_length = 40
+            filled = int(bar_length * percent / 100)
+            bar = '█' * filled + '░' * (bar_length - filled)
+            
+            # Print progress
+            line = (f"{Fore.CYAN}{bar} {Style.BRIGHT}{percent:3d}%{Style.RESET_ALL} | "
+                   f"Time: {elapsed:.1f}s | Total: {Fore.WHITE}{total}{Fore.RESET} | "
+                   f"Allowed: {Fore.GREEN}{allowed}{Fore.RESET} | "
+                   f"Blocked: {Fore.RED}{blocked}{Fore.RESET} | "
+                   f"RPS: {Fore.MAGENTA}{rps:.1f}{Fore.RESET}")
+            
+            print(f"\r{line}", end="", flush=True)
+            
+            if elapsed >= self.duration:
                 break
-            time.sleep(1)
-
+            
+            time.sleep(0.5)
+    
     def stop(self):
         self.stop_event.set()
 
+
+def print_summary(threads, duration):
+    """Print detailed summary statistics"""
+    print("\n\n" + "="*80)
+    print(f"{Fore.CYAN}{Style.BRIGHT}LOAD TEST SUMMARY{Style.RESET_ALL}")
+    print("="*80)
+    
+    # Overall statistics
+    total = sum(t.total for t in threads)
+    allowed = sum(t.allowed for t in threads)
+    blocked = sum(t.blocked for t in threads)
+    overall_rps = total / duration if duration > 0 else 0
+    success_rate = (allowed / total * 100) if total > 0 else 0
+    
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}Overall Statistics:{Style.RESET_ALL}")
+    print(f"  Duration:      {duration:.1f}s")
+    print(f"  Total Requests: {total}")
+    print(f"  Allowed:       {Fore.GREEN}{allowed}{Fore.RESET} ({success_rate:.1f}%)")
+    print(f"  Blocked:       {Fore.RED}{blocked}{Fore.RESET} ({100-success_rate:.1f}%)")
+    print(f"  Avg RPS:       {overall_rps:.2f}")
+    
+    # Per-client statistics
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}Per-Client Statistics:{Style.RESET_ALL}")
+    print(f"{'Client':<15} {'Total':>8} {'Allowed':>8} {'Blocked':>8} {'Success':>8} {'Avg(ms)':>8} {'P95(ms)':>8} {'P99(ms)':>8}")
+    print("-" * 80)
+    
+    for thread in threads:
+        stats = thread.get_stats()
+        print(f"{stats['name']:<15} "
+              f"{stats['total']:>8} "
+              f"{Fore.GREEN}{stats['allowed']:>8}{Fore.RESET} "
+              f"{Fore.RED}{stats['blocked']:>8}{Fore.RESET} "
+              f"{stats['success_rate']:>7.1f}% "
+              f"{stats['avg_latency']:>8.1f} "
+              f"{stats['p95_latency']:>8.1f} "
+              f"{stats['p99_latency']:>8.1f}")
+    
+    print("="*80)
+
+
+def export_results(threads, duration, output_file, format='csv'):
+    """Export results to file"""
+    if format == 'csv':
+        with open(output_file, 'w') as f:
+            # Header
+            f.write("Client,Total,Allowed,Blocked,Success_Rate,Avg_Latency_ms,Min_Latency_ms,Max_Latency_ms,P95_Latency_ms,P99_Latency_ms\n")
+            
+            # Data
+            for thread in threads:
+                stats = thread.get_stats()
+                f.write(f"{stats['name']},{stats['total']},{stats['allowed']},{stats['blocked']},"
+                       f"{stats['success_rate']:.2f},{stats['avg_latency']:.2f},"
+                       f"{stats['min_latency']:.2f},{stats['max_latency']:.2f},"
+                       f"{stats['p95_latency']:.2f},{stats['p99_latency']:.2f}\n")
+        
+        print(f"\n{Fore.GREEN}✓ Results exported to: {output_file}{Fore.RESET}")
+    
+    elif format == 'json':
+        results = {
+            'duration': duration,
+            'timestamp': datetime.now().isoformat(),
+            'clients': [thread.get_stats() for thread in threads],
+            'summary': {
+                'total': sum(t.total for t in threads),
+                'allowed': sum(t.allowed for t in threads),
+                'blocked': sum(t.blocked for t in threads),
+            }
+        }
+        
+        with open(output_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        print(f"\n{Fore.GREEN}✓ Results exported to: {output_file}{Fore.RESET}")
+
+
+def load_config_file(file_path):
+    """Load client configuration from JSON file"""
+    with open(file_path, 'r') as f:
+        return json.load(f)
+
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Rate Limiter Load Simulator - Advanced load testing tool',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument('--duration', type=int, default=120,
+                       help='Test duration in seconds (default: 120)')
+    
+    parser.add_argument('--base-url', type=str, default='http://localhost:5000/api/data',
+                       help='Base URL for API requests (default: http://localhost:5000/api/data)')
+    
+    parser.add_argument('--config-file', type=str,
+                       help='Path to JSON configuration file with client definitions')
+    
+    parser.add_argument('--api-keys', type=str,
+                       help='Comma-separated list of API keys to test')
+    
+    parser.add_argument('--pattern', type=str, default='steady',
+                       choices=['steady', 'ramp-up', 'spike', 'wave'],
+                       help='Traffic pattern to use (default: steady)')
+    
+    parser.add_argument('--output', type=str,
+                       help='Output file path for results (CSV or JSON based on extension)')
+    
+    parser.add_argument('--verbose', action='store_true',
+                       help='Enable verbose output with per-request logging')
+    
+    return parser.parse_args()
+
+
 def main():
+    args = parse_arguments()
+    
+    # Print header
+    print(f"\n{Fore.CYAN}{Style.BRIGHT}╔════════════════════════════════════════════════════════════════╗")
+    print(f"║           Rate Limiter Load Simulator v2.0                    ║")
+    print(f"╚════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}\n")
+    
+    # Load client configuration
+    if args.config_file:
+        print(f"Loading configuration from: {args.config_file}")
+        clients = load_config_file(args.config_file)
+    elif args.api_keys:
+        print(f"Using API keys from command line")
+        keys = args.api_keys.split(',')
+        clients = [
+            {
+                'name': f'Client-{i+1}',
+                'key': key.strip(),
+                'rps': 2,
+                'duration': args.duration
+            }
+            for i, key in enumerate(keys)
+        ]
+    else:
+        # Default configuration (fallback)
+        print(f"{Fore.YELLOW}Warning: No configuration provided. Using default test clients.{Fore.RESET}")
+        print(f"{Fore.YELLOW}Create clients via POST /api/clients and use --api-keys or --config-file{Fore.RESET}\n")
+        clients = [
+            {"name": "TestClient1", "key": "test_key_1", "rps": 2, "duration": args.duration},
+            {"name": "TestClient2", "key": "test_key_2", "rps": 3, "duration": args.duration},
+        ]
+    
+    # Add duration to all clients
+    for client in clients:
+        client['duration'] = args.duration
+    
+    # Print test configuration
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}Test Configuration:{Style.RESET_ALL}")
+    print(f"  Duration:     {args.duration}s")
+    print(f"  Base URL:     {args.base_url}")
+    print(f"  Pattern:      {args.pattern}")
+    print(f"  Clients:      {len(clients)}")
+    print(f"  Verbose:      {args.verbose}")
+    if args.output:
+        print(f"  Output File:  {args.output}")
+    
+    print(f"\n{Fore.YELLOW}Starting load test in 3 seconds...{Fore.RESET}")
+    time.sleep(3)
+    print()
+    
+    # Create and start client threads
     threads = []
-    for c in clients:
-        t = ClientSimulator(c)
-        t.start()
-        threads.append(t)
-
-    start_time = time.time()
-    reporter = Reporter(threads, start_time)
+    for client_config in clients:
+        thread = ClientSimulator(client_config, args.base_url, args.pattern, args.verbose)
+        thread.start()
+        threads.append(thread)
+    
+    # Start progress reporter
+    reporter = ProgressReporter(threads, args.duration)
     reporter.start()
-
+    
+    # Wait for completion
     try:
-        for t in threads:
-            t.join()
-    except KeyboardInterrupt:
-        for t in threads:
-            t.stop()
-        for t in threads:
-            t.join()
-    finally:
+        for thread in threads:
+            thread.join()
         reporter.stop()
         reporter.join()
-        print()  # move to next line after progress
+    except KeyboardInterrupt:
+        print(f"\n\n{Fore.YELLOW}Interrupted by user. Stopping...{Fore.RESET}")
+        for thread in threads:
+            thread.stop()
+        reporter.stop()
+        for thread in threads:
+            thread.join()
+        reporter.join()
+    
+    # Print summary
+    actual_duration = time.time() - threads[0].start_time if threads else args.duration
+    print_summary(threads, actual_duration)
+    
+    # Export results if requested
+    if args.output:
+        output_format = 'json' if args.output.endswith('.json') else 'csv'
+        export_results(threads, actual_duration, args.output, output_format)
+    
+    print(f"\n{Fore.GREEN}{Style.BRIGHT}✓ Load test completed successfully!{Style.RESET_ALL}\n")
 
-    # final summary
-    for t in threads:
-        print(f"{t.cfg['name']}: total={t.total}, allowed={t.allowed}, blocked={t.blocked}")
 
 if __name__ == "__main__":
     main()

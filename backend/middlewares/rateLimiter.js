@@ -1,6 +1,7 @@
 // middlewares/rateLimiter.js
 import redisClient from "../utils/redisClient.js";
 import Client from "../models/Client.js";
+import logger from "../utils/logger.js";
 
 export default function rateLimiter(redisClient) {
   return async (req, res, next) => {
@@ -16,6 +17,11 @@ export default function rateLimiter(redisClient) {
       const client = await Client.findOne({ apiKey });
       if (!client) {
         return res.status(401).json({ message: "Invalid API key" });
+      }
+
+      // Check if client is enabled
+      if (!client.enabled) {
+        return res.status(403).json({ message: "API key is disabled" });
       }
 
       const now = new Date();
@@ -39,14 +45,16 @@ export default function rateLimiter(redisClient) {
 
       if (wouldExceed) {
         // Do NOT increment totals; only track blocked
-        await redisClient.incr(blockedKey);
+        const blockedCountRaw = await redisClient.incr(blockedKey);
         await redisClient.expire(blockedKey, 86400);
 
         io.emit("blockedRequest", {
           apiKey,
+          clientName: client.name,
           timestamp: now,
           minuteCount: currentMinute,
           dayCount: currentDay,
+          blockedCount: parseInt(blockedCountRaw || "0", 10),
           perMinuteLimit: client.perMinuteLimit,
           perDayLimit: client.perDayLimit
         });
@@ -63,10 +71,15 @@ export default function rateLimiter(redisClient) {
         .expire(dayKey, 86400)
         .exec();
 
+      // Get current blocked count for complete data
+      const blockedCountRaw = await redisClient.get(blockedKey);
+
       io.emit("usageUpdate", {
         apiKey,
+        clientName: client.name,
         minuteCount: nextMinute,
         dayCount: nextDay,
+        blockedCount: parseInt(blockedCountRaw || "0", 10),
         limits: {
           perMinute: client.perMinuteLimit,
           perDay: client.perDayLimit
@@ -76,7 +89,7 @@ export default function rateLimiter(redisClient) {
 
       next();
     } catch (error) {
-      console.error("Rate limiter error:", error);
+      logger.error("Rate limiter error:", error);
       return res.status(500).json({ message: "Internal server error" });
     }
   };

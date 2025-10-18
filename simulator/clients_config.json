@@ -1,0 +1,15 @@
+[
+  {
+    "name": "new1",
+    "key": "015f49ff1a5caed290eb0e49392be5f5",
+    "rps": 5,
+    "description": "High volume client for testing rate limits"
+  },
+  {
+    "name": "new2",
+    "key": "bc175c9efc2d2b80f4a989a54f2e3e27",
+    "rps": 3,
+    "description": "Medium volume client"
+  }
+]
+
