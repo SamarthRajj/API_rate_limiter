@@ -68,3 +68,4 @@ pip-delete-this-directory.txt
 *.patch
 *.tgz
 
+FIXES_SUMMARY.md
