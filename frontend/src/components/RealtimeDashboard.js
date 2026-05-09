@@ -11,10 +11,51 @@ function nowLabel() {
   return new Date().toLocaleTimeString();
 }
 
+const DEMO_CLIENTS = [
+  {
+    name: "AppA",
+    apiKey: "68f1e0aced2e2209642f6406",
+    minuteCount: 42,
+    dayCount: 1234,
+    blockedCount: 19,
+    perMinuteLimit: 60,
+    perDayLimit: 5000,
+  },
+  {
+    name: "new2",
+    apiKey: "bc175c9efc2d2b80f4a989a54f2e3e27",
+    minuteCount: 17,
+    dayCount: 620,
+    blockedCount: 6,
+    perMinuteLimit: 30,
+    perDayLimit: 2500,
+  },
+];
+
+function buildDemoSeries() {
+  const now = Date.now();
+  const points = 30;
+
+  const series = {};
+  for (const c of DEMO_CLIENTS) {
+    const arr = [];
+    for (let i = points - 1; i >= 0; i--) {
+      const ts = now - i * 1000;
+      const tick = points - i;
+      const allowed = c.name === "AppA" ? (tick % 6 === 0 ? 2 : 1) : (tick % 10 === 0 ? 2 : 1);
+      const blocked = c.name === "AppA" ? (tick % 11 === 0 ? 1 : 0) : (tick % 17 === 0 ? 1 : 0);
+      arr.push({ ts, tsLabel: new Date(ts).toLocaleTimeString(), allowed, blocked });
+    }
+    series[c.apiKey] = arr;
+  }
+  return series;
+}
+
 export default function RealtimeDashboard() {
   const [clients, setClients] = useState([]); // holds client meta + current counts
   const [series, setSeries] = useState({}); // per-client time series: { apiKey: [{tsLabel, allowed, blocked, total}] }
   const socketRef = useRef(null);
+  const [usingDemo, setUsingDemo] = useState(false);
 
   useEffect(() => {
     // fetch initial client list + counts
@@ -26,7 +67,14 @@ export default function RealtimeDashboard() {
           const clientsData = Array.isArray(data) ? data : [];
           console.log('Fetched usage data:', clientsData);
           
-          // Update clients state with current counts
+          if (clientsData.length === 0) {
+            setUsingDemo(true);
+            setClients(DEMO_CLIENTS);
+            setSeries(buildDemoSeries());
+            return;
+          }
+
+          setUsingDemo(false);
           setClients(clientsData);
           
           // Initialize series ONLY if empty (first load)
@@ -48,7 +96,9 @@ export default function RealtimeDashboard() {
         })
         .catch(err => {
           console.error("Error fetching usage data:", err);
-          setClients([]);
+          setUsingDemo(true);
+          setClients(DEMO_CLIENTS);
+          setSeries(buildDemoSeries());
         });
     };
 
@@ -103,6 +153,9 @@ export default function RealtimeDashboard() {
   const handleEvent = (p) => {
     // Log for debugging
     console.log('Socket event received:', p);
+
+    // If we are showing demo data, ignore socket events until real API is available.
+    if (usingDemo) return;
     
     setClients(prev => {
       // update client list counts (if known)
@@ -200,20 +253,44 @@ export default function RealtimeDashboard() {
     });
   };
 
-  if (!Array.isArray(clients) || clients.length === 0) {
-    return (
-      <div className="max-w-7xl mx-auto px-4 py-8">
-        <div className="bg-white rounded-lg shadow-md p-12 text-center">
-          <Activity className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-          <h3 className="text-xl font-semibold text-gray-900 mb-2">No Clients Yet</h3>
-          <p className="text-gray-600">Create your first API client to start monitoring rate limits.</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
+      {/* Getting real-time data note */}
+      <div className={`rounded-lg shadow-md p-6 mb-8 border ${usingDemo ? "bg-amber-50 border-amber-200" : "bg-blue-50 border-blue-200"}`}>
+        <div className="flex items-start gap-3">
+          <AlertCircle className={`w-6 h-6 mt-0.5 ${usingDemo ? "text-amber-700" : "text-blue-700"}`} />
+          <div className="flex-1">
+            <h2 className="text-lg font-semibold text-gray-900">
+              {usingDemo ? "Demo data shown (static)" : "Live data (real-time)"}
+            </h2>
+            <p className="text-sm text-gray-700 mt-1">
+              To get real-time analysis in your own deployment, clone the project and run the backend API yourself (or point the frontend to a test API).
+              Then run the simulator from your local PC to generate traffic.
+            </p>
+
+            <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="bg-white/70 rounded-md border border-gray-200 p-4">
+                <div className="text-sm font-semibold text-gray-900 mb-2">Test API Keys (from `simulator/clients_config.json`)</div>
+                <div className="text-xs text-gray-700 font-mono space-y-1">
+                  <div>AppA: 68f1e0aced2e2209642f6406</div>
+                  <div>new2: bc175c9efc2d2b80f4a989a54f2e3e27</div>
+                </div>
+              </div>
+
+              <div className="bg-white/70 rounded-md border border-gray-200 p-4">
+                <div className="text-sm font-semibold text-gray-900 mb-2">Run simulation (local)</div>
+                <div className="text-xs text-gray-700 font-mono">
+                  python simulator/simulator_load.py --api-keys 68f1e0aced2e2209642f6406 --duration 120 --pattern steady
+                </div>
+                <div className="text-xs text-gray-600 mt-2">
+                  If you’re using a test API base URL, pass it like: <span className="font-mono">--base-url https://YOUR_TEST_API/api/data</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
         <div className="bg-white rounded-lg shadow-md p-6">
@@ -266,7 +343,14 @@ export default function RealtimeDashboard() {
       {/* Clients Overview Table */}
       <div className="bg-white rounded-lg shadow-md overflow-hidden mb-8">
         <div className="px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Clients Overview</h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-gray-900">Clients Overview</h2>
+            {usingDemo && (
+              <span className="text-xs font-semibold px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
+                Demo snapshot
+              </span>
+            )}
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
