@@ -5,9 +5,31 @@ import { format } from 'date-fns';
 
 const COLORS = ['#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
+const DEMO_USAGE_DATA = [
+  {
+    name: "AppA",
+    apiKey: "68f1e0aced2e2209642f6406",
+    minuteCount: 42,
+    dayCount: 1234,
+    blockedCount: 19,
+    perMinuteLimit: 60,
+    perDayLimit: 5000,
+  },
+  {
+    name: "new2",
+    apiKey: "bc175c9efc2d2b80f4a989a54f2e3e27",
+    minuteCount: 17,
+    dayCount: 620,
+    blockedCount: 6,
+    perMinuteLimit: 30,
+    perDayLimit: 2500,
+  },
+];
+
 const Analytics = () => {
   const [usageData, setUsageData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [usingDemo, setUsingDemo] = useState(false);
 
   useEffect(() => {
     fetchUsageData();
@@ -21,11 +43,19 @@ const Analytics = () => {
       const response = await fetch('http://localhost:5000/api/usage');
       const data = await response.json();
       console.log('Analytics: Fetched usage data', data); // Debug log
-      setUsageData(Array.isArray(data) ? data : []);
+      const arr = Array.isArray(data) ? data : [];
+      if (arr.length === 0) {
+        setUsingDemo(true);
+        setUsageData(DEMO_USAGE_DATA);
+      } else {
+        setUsingDemo(false);
+        setUsageData(arr);
+      }
       setLoading(false);
     } catch (error) {
       console.error('Error fetching usage data:', error);
-      setUsageData([]);
+      setUsingDemo(true);
+      setUsageData(DEMO_USAGE_DATA);
       setLoading(false);
     }
   };
@@ -118,6 +148,25 @@ const Analytics = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
+      {/* Demo note */}
+      <div className={`rounded-lg shadow-md p-5 mb-6 border ${usingDemo ? "bg-amber-50 border-amber-200" : "bg-blue-50 border-blue-200"}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900">
+              {usingDemo ? "Demo data shown (static)" : "Live data (real-time)"}
+            </h3>
+            <p className="text-xs text-gray-700 mt-1">
+              For real-time analytics, point the frontend to a running backend and generate traffic using the simulator from your local machine.
+            </p>
+          </div>
+          {usingDemo && (
+            <span className="text-xs font-semibold px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
+              Demo snapshot
+            </span>
+          )}
+        </div>
+      </div>
+
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-900">Analytics & Insights</h2>
         <button

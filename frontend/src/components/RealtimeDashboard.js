@@ -286,6 +286,17 @@ export default function RealtimeDashboard() {
                   If you’re using a test API base URL, pass it like: <span className="font-mono">--base-url https://YOUR_TEST_API/api/data</span>
                 </div>
               </div>
+
+              <div className="bg-white/70 rounded-md border border-gray-200 p-4 lg:col-span-2">
+                <div className="text-sm font-semibold text-gray-900 mb-2">Admin panel (create custom API keys)</div>
+                <div className="text-xs text-gray-700">
+                  Use the Admin tab to create custom API keys and limits for testing real-time rate limiting.
+                </div>
+                <div className="text-xs text-gray-700 font-mono mt-2 space-y-1">
+                  <div>username: admin</div>
+                  <div>password: admin123</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
