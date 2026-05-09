@@ -1,7 +1,7 @@
 [
   {
-    "name": "new1",
-    "key": "015f49ff1a5caed290eb0e49392be5f5",
+    "name": "AppA",
+    "key": "68f1e0aced2e2209642f6406",
     "rps": 5,
     "description": "High volume client for testing rate limits"
   },
