@@ -2,10 +2,20 @@
 import React, { useEffect, useState, useRef } from "react";
 import { io } from "socket.io-client";
 import { AreaChart, Area, Bar, BarChart, CartesianGrid, ReferenceLine, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { Activity, AlertCircle, TrendingUp, Users } from 'lucide-react';
+import { Activity, AlertCircle, Clock, Gauge, Loader2, Play, TrendingUp, Users, Zap } from 'lucide-react';
 
-const SOCKET_URL = "http://localhost:5000"; // change if needed
-const USAGE_API = "http://localhost:5000/api/usage";
+const API_BASE_URL = (process.env.REACT_APP_API_URL || "http://localhost:5000").replace(/\/$/, "");
+const SOCKET_URL = API_BASE_URL;
+const USAGE_API = `${API_BASE_URL}/api/usage`;
+const DEMO_API = `${API_BASE_URL}/api/demo`;
+
+const SIMULATION_CONFIGS = {
+  slow: { label: "Slow", rate: "2.5 req/s", count: 15, interval: 400 },
+  medium: { label: "Medium", rate: "7 req/s", count: 25, interval: 150 },
+  burst: { label: "Burst", rate: "20 req/s", count: 40, interval: 50 },
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function nowLabel() {
   return new Date().toLocaleTimeString();
@@ -55,7 +65,12 @@ export default function RealtimeDashboard() {
   const [clients, setClients] = useState([]); // holds client meta + current counts
   const [series, setSeries] = useState({}); // per-client time series: { apiKey: [{tsLabel, allowed, blocked, total}] }
   const socketRef = useRef(null);
+  const usingDemoRef = useRef(false);
   const [usingDemo, setUsingDemo] = useState(false);
+  const [selectedApiKey, setSelectedApiKey] = useState("");
+  const [simulating, setSimulating] = useState(false);
+  const [simulationMode, setSimulationMode] = useState(null);
+  const [simLog, setSimLog] = useState([]);
 
   useEffect(() => {
     // fetch initial client list + counts
@@ -65,15 +80,15 @@ export default function RealtimeDashboard() {
         .then(data => {
           // Ensure data is an array
           const clientsData = Array.isArray(data) ? data : [];
-          console.log('Fetched usage data:', clientsData);
-          
           if (clientsData.length === 0) {
+            usingDemoRef.current = true;
             setUsingDemo(true);
             setClients(DEMO_CLIENTS);
             setSeries(buildDemoSeries());
             return;
           }
 
+          usingDemoRef.current = false;
           setUsingDemo(false);
           setClients(clientsData);
           
@@ -95,7 +110,8 @@ export default function RealtimeDashboard() {
           });
         })
         .catch(err => {
-          console.error("Error fetching usage data:", err);
+          console.warn("Usage API unavailable; showing static sample data.", err);
+          usingDemoRef.current = true;
           setUsingDemo(true);
           setClients(DEMO_CLIENTS);
           setSeries(buildDemoSeries());
@@ -105,39 +121,37 @@ export default function RealtimeDashboard() {
     // Initial fetch
     fetchUsage();
 
-    // Refresh usage data every 3 seconds to ensure table stays updated
-    const refreshInterval = setInterval(fetchUsage, 3000);
+    // Refresh usage data while simulations are running so counters stay live even if sockets reconnect.
+    const refreshInterval = setInterval(fetchUsage, 800);
 
     // connect socket
     socketRef.current = io(SOCKET_URL, { transports: ["websocket"] });
 
-    socketRef.current.on("connect", () => {
-      console.log("connected to socket", socketRef.current.id);
-    });
-
     // backend emits 'usageUpdate' for allowed requests and 'blockedRequest' when blocking
     socketRef.current.on("usageUpdate", (p) => {
-      console.log('usageUpdate event:', p);
       // Map backend payload to our handler's expected shape
       handleEvent({
         apiKey: p.apiKey,
         status: "allowed",
         ts: new Date(p.timestamp).getTime(),
+        clientName: p.clientName,
         minuteCount: p.minuteCount,
         dayCount: p.dayCount,
+        blockedCount: p.blockedCount,
         perMinuteLimit: p.limits?.perMinute,
         perDayLimit: p.limits?.perDay
       });
     });
 
     socketRef.current.on("blockedRequest", (p) => {
-      console.log('blockedRequest event:', p);
       handleEvent({
         apiKey: p.apiKey,
         status: "blocked",
         ts: new Date(p.timestamp).getTime(),
+        clientName: p.clientName,
         minuteCount: p.minuteCount,
         dayCount: p.dayCount,
+        blockedCount: p.blockedCount,
         perMinuteLimit: p.perMinuteLimit,
         perDayLimit: p.perDayLimit
       });
@@ -150,12 +164,27 @@ export default function RealtimeDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleEvent = (p) => {
-    // Log for debugging
-    console.log('Socket event received:', p);
+  useEffect(() => {
+    if (usingDemo) {
+      setSelectedApiKey("");
+      return;
+    }
 
+    const enabledClients = clients.filter(c => c.enabled !== false && c.apiKey);
+    if (enabledClients.length === 0) {
+      setSelectedApiKey("");
+      return;
+    }
+
+    setSelectedApiKey(prev => {
+      const stillExists = enabledClients.some(c => c.apiKey === prev);
+      return stillExists ? prev : enabledClients[0].apiKey;
+    });
+  }, [clients, usingDemo]);
+
+  const handleEvent = (p) => {
     // If we are showing demo data, ignore socket events until real API is available.
-    if (usingDemo) return;
+    if (usingDemoRef.current) return;
     
     setClients(prev => {
       // update client list counts (if known)
@@ -209,6 +238,55 @@ export default function RealtimeDashboard() {
     });
   };
 
+  const runSimulation = async (mode) => {
+    const config = SIMULATION_CONFIGS[mode];
+    const client = clients.find(c => c.apiKey === selectedApiKey) || clients.find(c => c.enabled !== false && c.apiKey);
+
+    if (!config || !client || usingDemo || simulating) return;
+
+    setSimulating(true);
+    setSimulationMode(mode);
+    setSimLog([]);
+
+    const log = [];
+
+    for (let i = 0; i < config.count; i += 1) {
+      const startedAt = performance.now();
+
+      try {
+        const response = await fetch(DEMO_API, {
+          method: "GET",
+          headers: {
+            "x-api-key": client.apiKey,
+          },
+        });
+
+        log.push({
+          id: i + 1,
+          status: response.status,
+          passed: response.status >= 200 && response.status < 300,
+          latencyMs: Math.round(performance.now() - startedAt),
+        });
+      } catch (error) {
+        log.push({
+          id: i + 1,
+          status: "ERR",
+          passed: false,
+          latencyMs: 0,
+        });
+      }
+
+      setSimLog([...log]);
+
+      if (i < config.count - 1) {
+        await sleep(config.interval);
+      }
+    }
+
+    setSimulating(false);
+    setSimulationMode(null);
+  };
+
   // Build per-second bar data: allowed, blocked per second
   const buildPerSecondData = (apiKey) => {
     const s = series[apiKey] || [];
@@ -252,6 +330,11 @@ export default function RealtimeDashboard() {
       };
     });
   };
+
+  const realClients = usingDemo ? [] : clients.filter(c => c.enabled !== false && c.apiKey);
+  const selectedClient = realClients.find(c => c.apiKey === selectedApiKey) || realClients[0];
+  const passedCount = simLog.filter(entry => entry.passed).length;
+  const blockedCount = simLog.filter(entry => !entry.passed).length;
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -300,6 +383,134 @@ export default function RealtimeDashboard() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Browser traffic simulator */}
+      <div className="bg-white rounded-lg shadow-md border border-gray-200 p-6 mb-8">
+        <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
+          <div>
+            <div className="flex items-center gap-2">
+              <Play className="w-5 h-5 text-primary-600" aria-hidden="true" />
+              <h2 className="text-lg font-semibold text-gray-900">Live Demo - Simulate Traffic</h2>
+            </div>
+            <p className="text-sm text-gray-600 mt-1">
+              Fires real requests at <span className="font-mono">{DEMO_API}</span> with the selected client key.
+            </p>
+          </div>
+
+          <div className="w-full lg:w-80">
+            <label htmlFor="simulation-client" className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">
+              Client key
+            </label>
+            <select
+              id="simulation-client"
+              value={selectedApiKey}
+              onChange={(event) => setSelectedApiKey(event.target.value)}
+              disabled={simulating || realClients.length === 0}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:bg-gray-100 disabled:text-gray-500"
+            >
+              {realClients.length === 0 ? (
+                <option value="">No enabled clients available</option>
+              ) : (
+                realClients.map(client => (
+                  <option key={client.apiKey} value={client.apiKey}>
+                    {client.name} ({client.apiKey.slice(0, 10)}...)
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-5">
+          <button
+            onClick={() => runSimulation("slow")}
+            disabled={simulating || !selectedClient}
+            className="min-h-20 flex items-center justify-between gap-3 px-4 py-3 rounded-md border border-green-200 bg-green-50 text-left hover:bg-green-100 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            title="Slow simulation"
+          >
+            <span>
+              <span className="block text-sm font-semibold text-green-900">Slow</span>
+              <span className="block text-xs text-green-700">{SIMULATION_CONFIGS.slow.count} requests at {SIMULATION_CONFIGS.slow.rate}</span>
+            </span>
+            {simulating && simulationMode === "slow" ? (
+              <Loader2 className="w-5 h-5 text-green-700 animate-spin" aria-hidden="true" />
+            ) : (
+              <Clock className="w-5 h-5 text-green-700" aria-hidden="true" />
+            )}
+          </button>
+
+          <button
+            onClick={() => runSimulation("medium")}
+            disabled={simulating || !selectedClient}
+            className="min-h-20 flex items-center justify-between gap-3 px-4 py-3 rounded-md border border-yellow-200 bg-yellow-50 text-left hover:bg-yellow-100 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            title="Medium simulation"
+          >
+            <span>
+              <span className="block text-sm font-semibold text-yellow-900">Medium</span>
+              <span className="block text-xs text-yellow-700">{SIMULATION_CONFIGS.medium.count} requests at {SIMULATION_CONFIGS.medium.rate}</span>
+            </span>
+            {simulating && simulationMode === "medium" ? (
+              <Loader2 className="w-5 h-5 text-yellow-700 animate-spin" aria-hidden="true" />
+            ) : (
+              <Gauge className="w-5 h-5 text-yellow-700" aria-hidden="true" />
+            )}
+          </button>
+
+          <button
+            onClick={() => runSimulation("burst")}
+            disabled={simulating || !selectedClient}
+            className="min-h-20 flex items-center justify-between gap-3 px-4 py-3 rounded-md border border-red-200 bg-red-50 text-left hover:bg-red-100 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            title="Burst simulation"
+          >
+            <span>
+              <span className="block text-sm font-semibold text-red-900">Burst</span>
+              <span className="block text-xs text-red-700">{SIMULATION_CONFIGS.burst.count} requests at {SIMULATION_CONFIGS.burst.rate}</span>
+            </span>
+            {simulating && simulationMode === "burst" ? (
+              <Loader2 className="w-5 h-5 text-red-700 animate-spin" aria-hidden="true" />
+            ) : (
+              <Zap className="w-5 h-5 text-red-700" aria-hidden="true" />
+            )}
+          </button>
+        </div>
+
+        {usingDemo && (
+          <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            Connect to a running backend with at least one enabled client before running browser traffic.
+          </div>
+        )}
+
+        {simLog.length > 0 && (
+          <div className="mt-5 rounded-md border border-gray-200 bg-gray-50 p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
+              <div className="text-sm font-semibold text-gray-900">
+                {selectedClient?.name || "Selected client"} results
+              </div>
+              <div className="text-sm text-gray-700">
+                <span className="font-semibold text-green-700">{passedCount}</span> allowed
+                <span className="mx-2 text-gray-400">|</span>
+                <span className="font-semibold text-red-700">{blockedCount}</span> blocked or failed
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {simLog.map(entry => (
+                <span
+                  key={entry.id}
+                  title={`Request ${entry.id}: ${entry.status} in ${entry.latencyMs}ms`}
+                  className={`w-8 h-8 inline-flex items-center justify-center rounded-md text-xs font-semibold border ${
+                    entry.passed
+                      ? "bg-green-100 text-green-800 border-green-200"
+                      : "bg-red-100 text-red-800 border-red-200"
+                  }`}
+                >
+                  {entry.status}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Summary Cards */}

@@ -2,7 +2,6 @@
 import express from "express";
 import Client from "../models/Client.js";
 import redisClient from "../utils/redisClient.js";
-import cacheMiddleware from "../middlewares/cache.js";
 import logger from "../utils/logger.js";
 
 const router = express.Router();
@@ -17,7 +16,7 @@ const router = express.Router();
  *       200:
  *         description: Usage statistics for all clients
  */
-router.get("/", cacheMiddleware(5), async (req, res, next) => {
+router.get("/", async (req, res, next) => {
   try {
     const clients = await Client.find();
     const results = [];
