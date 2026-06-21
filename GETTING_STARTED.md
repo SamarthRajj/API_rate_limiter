@@ -83,7 +83,26 @@ cd simulator
 python simulator_load.py --config-file clients_config.json --pattern spike --duration 60
 ```
 
-### Step 7: Watch Real-time Dashboard
+For high-concurrency stress testing:
+
+```bash
+python simulator_load.py --config-file clients_config.json --pattern stress --concurrency 20 --duration 60 --output results.json
+```
+
+### Step 7: Run Benchmark Suite (optional)
+
+See `BENCHMARKS.md` for full details. Quick start:
+
+```bash
+# Enable benchmark mode in backend/.env
+# BENCHMARK_MODE=true
+
+cd benchmarks
+npm install
+npm run suite
+```
+
+### Step 8: Watch Real-time Dashboard
 
 Go back to `http://localhost:3000` and watch:
 - Real-time request counters updating
@@ -150,6 +169,22 @@ done
 3. Watch metrics update live
 4. Check charts for visual patterns
 
+### Run Backend Tests
+
+```bash
+cd backend
+npm test
+```
+
+### Environment Variables
+
+Copy `backend/.env.example` to `backend/.env` and adjust values:
+
+- `MONGO_URI` — MongoDB connection string
+- `REDIS_URL` — Redis connection URL
+- `ADMIN_JWT_SECRET` — JWT signing secret
+- `BENCHMARK_MODE` — set to `true` to disable Swagger/WebSocket during load tests
+
 ## Troubleshooting
 
 ### Dashboard shows no data
@@ -169,10 +204,10 @@ done
 
 ## Next Steps
 
-1. **Production Setup**: Review `README.md` deployment section
+1. **Benchmarks**: Review `BENCHMARKS.md` and run the benchmark suite
 2. **Security**: Change JWT secret in `.env`
 3. **Monitoring**: Set up log aggregation
-4. **Testing**: Run comprehensive load tests
+4. **Testing**: Run `npm test` in backend and frontend
 5. **Documentation**: Review API docs at `/api-docs`
 
 ## Key Endpoints
@@ -184,7 +219,7 @@ done
 
 ## Support
 
-- Check `README.md` for comprehensive documentation
+- Check `BENCHMARKS.md` for load testing and performance
 - Review API documentation at `/api-docs`
 - Check backend logs for detailed error messages
 - Verify environment variables in `.env`

@@ -1,7 +1,6 @@
-// middlewares/rateLimiter.js
-import redisClient from "../utils/redisClient.js";
 import Client from "../models/Client.js";
 import logger from "../utils/logger.js";
+import { resolveClientConfig } from "../utils/clientConfigCache.js";
 
 export default function rateLimiter(redisClient) {
   return async (req, res, next) => {
@@ -13,27 +12,23 @@ export default function rateLimiter(redisClient) {
     }
 
     try {
-      // Get client config from MongoDB
-      const client = await Client.findOne({ apiKey });
+      const client = await resolveClientConfig(redisClient, apiKey);
       if (!client) {
         return res.status(401).json({ message: "Invalid API key" });
       }
 
-      // Check if client is enabled
       if (!client.enabled) {
         return res.status(403).json({ message: "API key is disabled" });
       }
 
       const now = new Date();
-      const minuteWindow = Math.floor(Date.now() / 60000); // Proper minute window
-      const today = now.toISOString().slice(0, 10); // YYYY-MM-DD format
+      const minuteWindow = Math.floor(Date.now() / 60000);
+      const today = now.toISOString().slice(0, 10);
 
-      // Use consistent Redis key patterns with usage routes
       const minuteKey = `count:${apiKey}:m:${minuteWindow}`;
       const dayKey = `count:${apiKey}:d:${today}`;
       const blockedKey = `blocked:${apiKey}:d:${today}`;
 
-      // Read current counters first (blocked should NOT count towards totals)
       const [minuteRaw, dayRaw] = await redisClient.mGet(minuteKey, dayKey);
       const currentMinute = parseInt(minuteRaw || "0", 10);
       const currentDay = parseInt(dayRaw || "0", 10);
@@ -41,10 +36,10 @@ export default function rateLimiter(redisClient) {
       const nextMinute = currentMinute + 1;
       const nextDay = currentDay + 1;
 
-      const wouldExceed = nextMinute > client.perMinuteLimit || nextDay > client.perDayLimit;
+      const wouldExceed =
+        nextMinute > client.perMinuteLimit || nextDay > client.perDayLimit;
 
       if (wouldExceed) {
-        // Do NOT increment totals; only track blocked
         const blockedCountRaw = await redisClient.incr(blockedKey);
         await redisClient.expire(blockedKey, 86400);
 
@@ -56,13 +51,12 @@ export default function rateLimiter(redisClient) {
           dayCount: currentDay,
           blockedCount: parseInt(blockedCountRaw || "0", 10),
           perMinuteLimit: client.perMinuteLimit,
-          perDayLimit: client.perDayLimit
+          perDayLimit: client.perDayLimit,
         });
 
         return res.status(429).json({ message: "Rate limit exceeded" });
       }
 
-      // Allowed: increment totals atomically and set expirations
       await redisClient
         .multi()
         .incr(minuteKey)
@@ -71,7 +65,6 @@ export default function rateLimiter(redisClient) {
         .expire(dayKey, 86400)
         .exec();
 
-      // Get current blocked count for complete data
       const blockedCountRaw = await redisClient.get(blockedKey);
 
       io.emit("usageUpdate", {
@@ -82,7 +75,7 @@ export default function rateLimiter(redisClient) {
         blockedCount: parseInt(blockedCountRaw || "0", 10),
         limits: {
           perMinute: client.perMinuteLimit,
-          perDay: client.perDayLimit
+          perDay: client.perDayLimit,
         },
         timestamp: now,
       });
@@ -94,4 +87,3 @@ export default function rateLimiter(redisClient) {
     }
   };
 }
-  

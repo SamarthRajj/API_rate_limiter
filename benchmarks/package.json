@@ -1,0 +1,15 @@
+{
+  "name": "rate-limiter-benchmarks",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "seed": "node seedClients.mjs",
+    "stress": "node stress.mjs",
+    "suite": "node run-suite.mjs",
+    "report": "node generateReport.mjs"
+  },
+  "dependencies": {
+    "autocannon": "^8.0.0"
+  }
+}

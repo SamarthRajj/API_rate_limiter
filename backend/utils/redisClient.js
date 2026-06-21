@@ -27,6 +27,8 @@ client.on("connect", () => console.log("Redis connecting..."));
 client.on("ready", () => console.log("✅ Redis ready"));
 client.on("reconnecting", () => console.log("Redis reconnecting..."));
 
-await client.connect();
+if (process.env.NODE_ENV !== "test") {
+  await client.connect();
+}
 
 export default client;

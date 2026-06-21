@@ -21,6 +21,7 @@ import sys
 import math
 from collections import defaultdict
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Try to import colorama for colored output
 try:
@@ -39,12 +40,13 @@ except ImportError:
 class ClientSimulator(threading.Thread):
     """Simulates a client making requests with configurable traffic patterns"""
     
-    def __init__(self, config, base_url, pattern='steady', verbose=False):
+    def __init__(self, config, base_url, pattern='steady', verbose=False, concurrency=1):
         super().__init__()
         self.config = config
         self.base_url = base_url
         self.pattern = pattern
         self.verbose = verbose
+        self.concurrency = max(1, concurrency)
         self.allowed = 0
         self.blocked = 0
         self.total = 0
@@ -88,6 +90,10 @@ class ClientSimulator(threading.Thread):
             # Sinusoidal pattern
             wave = math.sin(elapsed / 10.0)  # Period of ~63 seconds
             return int(base_rps + base_rps * wave)
+
+        elif self.pattern == 'stress':
+            # Sustained high load for stress testing
+            return max(base_rps * 5, 10)
         
         else:
             return base_rps
@@ -95,6 +101,13 @@ class ClientSimulator(threading.Thread):
     def send_burst(self, rps):
         """Send a burst of requests for this second"""
         if rps <= 0:
+            return
+
+        if self.concurrency > 1:
+            with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+                futures = [executor.submit(self.send_request) for _ in range(rps)]
+                for future in as_completed(futures):
+                    future.result()
             return
         
         interval = 1.0 / rps
@@ -145,6 +158,14 @@ class ClientSimulator(threading.Thread):
     def stop(self):
         """Signal the thread to stop"""
         self.stop_event.set()
+
+    @staticmethod
+    def percentile(sorted_values, pct):
+        if not sorted_values:
+            return 0.0
+        index = int(len(sorted_values) * pct)
+        index = min(index, len(sorted_values) - 1)
+        return sorted_values[index]
     
     def get_stats(self):
         """Calculate and return statistics"""
@@ -158,6 +179,7 @@ class ClientSimulator(threading.Thread):
                 'avg_latency': 0.0,
                 'min_latency': 0.0,
                 'max_latency': 0.0,
+                'p50_latency': 0.0,
                 'p95_latency': 0.0,
                 'p99_latency': 0.0,
             }
@@ -174,8 +196,9 @@ class ClientSimulator(threading.Thread):
             'avg_latency': sum(sorted_latencies) / n,
             'min_latency': sorted_latencies[0],
             'max_latency': sorted_latencies[-1],
-            'p95_latency': sorted_latencies[int(n * 0.95)],
-            'p99_latency': sorted_latencies[int(n * 0.99)],
+            'p50_latency': self.percentile(sorted_latencies, 0.50),
+            'p95_latency': self.percentile(sorted_latencies, 0.95),
+            'p99_latency': self.percentile(sorted_latencies, 0.99),
         }
 
 
@@ -224,6 +247,33 @@ class ProgressReporter(threading.Thread):
         self.stop_event.set()
 
 
+def aggregate_percentiles(threads):
+    """Compute aggregate latency percentiles across all clients"""
+    all_latencies = []
+    for thread in threads:
+        all_latencies.extend(thread.latencies)
+
+    if not all_latencies:
+        return {
+            'p50_latency': 0.0,
+            'p95_latency': 0.0,
+            'p99_latency': 0.0,
+            'avg_latency': 0.0,
+            'min_latency': 0.0,
+            'max_latency': 0.0,
+        }
+
+    sorted_latencies = sorted(all_latencies)
+    return {
+        'p50_latency': ClientSimulator.percentile(sorted_latencies, 0.50),
+        'p95_latency': ClientSimulator.percentile(sorted_latencies, 0.95),
+        'p99_latency': ClientSimulator.percentile(sorted_latencies, 0.99),
+        'avg_latency': sum(sorted_latencies) / len(sorted_latencies),
+        'min_latency': sorted_latencies[0],
+        'max_latency': sorted_latencies[-1],
+    }
+
+
 def print_summary(threads, duration):
     """Print detailed summary statistics"""
     print("\n\n" + "="*80)
@@ -243,11 +293,18 @@ def print_summary(threads, duration):
     print(f"  Allowed:       {Fore.GREEN}{allowed}{Fore.RESET} ({success_rate:.1f}%)")
     print(f"  Blocked:       {Fore.RED}{blocked}{Fore.RESET} ({100-success_rate:.1f}%)")
     print(f"  Avg RPS:       {overall_rps:.2f}")
+
+    aggregate = aggregate_percentiles(threads)
+    print(f"\n{Fore.WHITE}{Style.BRIGHT}Aggregate Latency (all clients):{Style.RESET_ALL}")
+    print(f"  Avg:  {aggregate['avg_latency']:.1f}ms")
+    print(f"  P50:  {aggregate['p50_latency']:.1f}ms")
+    print(f"  P95:  {aggregate['p95_latency']:.1f}ms")
+    print(f"  P99:  {aggregate['p99_latency']:.1f}ms")
     
     # Per-client statistics
     print(f"\n{Fore.WHITE}{Style.BRIGHT}Per-Client Statistics:{Style.RESET_ALL}")
-    print(f"{'Client':<15} {'Total':>8} {'Allowed':>8} {'Blocked':>8} {'Success':>8} {'Avg(ms)':>8} {'P95(ms)':>8} {'P99(ms)':>8}")
-    print("-" * 80)
+    print(f"{'Client':<15} {'Total':>8} {'Allowed':>8} {'Blocked':>8} {'Success':>8} {'Avg(ms)':>8} {'P50(ms)':>8} {'P95(ms)':>8} {'P99(ms)':>8}")
+    print("-" * 96)
     
     for thread in threads:
         stats = thread.get_stats()
@@ -257,6 +314,7 @@ def print_summary(threads, duration):
               f"{Fore.RED}{stats['blocked']:>8}{Fore.RESET} "
               f"{stats['success_rate']:>7.1f}% "
               f"{stats['avg_latency']:>8.1f} "
+              f"{stats['p50_latency']:>8.1f} "
               f"{stats['p95_latency']:>8.1f} "
               f"{stats['p99_latency']:>8.1f}")
     
@@ -265,10 +323,12 @@ def print_summary(threads, duration):
 
 def export_results(threads, duration, output_file, format='csv'):
     """Export results to file"""
+    aggregate = aggregate_percentiles(threads)
+
     if format == 'csv':
         with open(output_file, 'w') as f:
             # Header
-            f.write("Client,Total,Allowed,Blocked,Success_Rate,Avg_Latency_ms,Min_Latency_ms,Max_Latency_ms,P95_Latency_ms,P99_Latency_ms\n")
+            f.write("Client,Total,Allowed,Blocked,Success_Rate,Avg_Latency_ms,Min_Latency_ms,Max_Latency_ms,P50_Latency_ms,P95_Latency_ms,P99_Latency_ms\n")
             
             # Data
             for thread in threads:
@@ -276,7 +336,11 @@ def export_results(threads, duration, output_file, format='csv'):
                 f.write(f"{stats['name']},{stats['total']},{stats['allowed']},{stats['blocked']},"
                        f"{stats['success_rate']:.2f},{stats['avg_latency']:.2f},"
                        f"{stats['min_latency']:.2f},{stats['max_latency']:.2f},"
-                       f"{stats['p95_latency']:.2f},{stats['p99_latency']:.2f}\n")
+                       f"{stats['p50_latency']:.2f},{stats['p95_latency']:.2f},{stats['p99_latency']:.2f}\n")
+
+            f.write(f"AGGREGATE,{sum(t.total for t in threads)},{sum(t.allowed for t in threads)},{sum(t.blocked for t in threads)},,,"
+                    f"{aggregate['avg_latency']:.2f},{aggregate['min_latency']:.2f},{aggregate['max_latency']:.2f},"
+                    f"{aggregate['p50_latency']:.2f},{aggregate['p95_latency']:.2f},{aggregate['p99_latency']:.2f}\n")
         
         print(f"\n{Fore.GREEN}✓ Results exported to: {output_file}{Fore.RESET}")
     
@@ -285,6 +349,7 @@ def export_results(threads, duration, output_file, format='csv'):
             'duration': duration,
             'timestamp': datetime.now().isoformat(),
             'clients': [thread.get_stats() for thread in threads],
+            'aggregate': aggregate,
             'summary': {
                 'total': sum(t.total for t in threads),
                 'allowed': sum(t.allowed for t in threads),
@@ -324,8 +389,11 @@ def parse_arguments():
                        help='Comma-separated list of API keys to test')
     
     parser.add_argument('--pattern', type=str, default='steady',
-                       choices=['steady', 'ramp-up', 'spike', 'wave'],
+                       choices=['steady', 'ramp-up', 'spike', 'wave', 'stress'],
                        help='Traffic pattern to use (default: steady)')
+
+    parser.add_argument('--concurrency', type=int, default=1,
+                       help='Concurrent workers per client burst (default: 1)')
     
     parser.add_argument('--output', type=str,
                        help='Output file path for results (CSV or JSON based on extension)')
@@ -378,6 +446,7 @@ def main():
     print(f"  Duration:     {args.duration}s")
     print(f"  Base URL:     {args.base_url}")
     print(f"  Pattern:      {args.pattern}")
+    print(f"  Concurrency:  {args.concurrency}")
     print(f"  Clients:      {len(clients)}")
     print(f"  Verbose:      {args.verbose}")
     if args.output:
@@ -390,7 +459,7 @@ def main():
     # Create and start client threads
     threads = []
     for client_config in clients:
-        thread = ClientSimulator(client_config, args.base_url, args.pattern, args.verbose)
+        thread = ClientSimulator(client_config, args.base_url, args.pattern, args.verbose, args.concurrency)
         thread.start()
         threads.append(thread)
     

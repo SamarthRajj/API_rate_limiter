@@ -7,10 +7,10 @@ import cacheMiddleware from "../middlewares/cache.js";
 import ApiError from "../utils/ApiError.js";
 import logger from "../utils/logger.js";
 import redisClient from "../utils/redisClient.js";
+import { invalidateClientConfig } from "../utils/clientConfigCache.js";
 
 const router = express.Router();
 
-// Helper to clear cache
 const clearClientsCache = async () => {
   try {
     const keys = await redisClient.keys("cache:/api/clients*");
@@ -19,6 +19,14 @@ const clearClientsCache = async () => {
     }
   } catch (err) {
     logger.error(`Cache clear error: ${err.message}`);
+  }
+};
+
+const invalidateClientConfigCache = async (apiKey) => {
+  try {
+    await invalidateClientConfig(redisClient, apiKey);
+  } catch (err) {
+    logger.error(`Client config cache clear error: ${err.message}`);
   }
 };
 
@@ -208,6 +216,7 @@ router.put(
       }
 
       await clearClientsCache();
+      await invalidateClientConfigCache(client.apiKey);
       logger.info(`Client updated: ${client.name} (${client.apiKey})`);
 
       res.json(client);
@@ -253,6 +262,7 @@ router.delete(
       }
 
       await clearClientsCache();
+      await invalidateClientConfigCache(client.apiKey);
       logger.info(`Client deleted: ${client.name} (${client.apiKey})`);
 
       res.json({ 
@@ -295,6 +305,12 @@ router.post(
         return next(new ApiError(400, errors.array()[0].msg));
       }
 
+      const existingClient = await Client.findById(req.params.id);
+      if (!existingClient) {
+        return next(new ApiError(404, "Client not found"));
+      }
+
+      const oldApiKey = existingClient.apiKey;
       const newApiKey = crypto.randomBytes(16).toString("hex");
       const client = await Client.findByIdAndUpdate(
         req.params.id,
@@ -302,11 +318,9 @@ router.post(
         { new: true }
       );
 
-      if (!client) {
-        return next(new ApiError(404, "Client not found"));
-      }
-
       await clearClientsCache();
+      await invalidateClientConfigCache(oldApiKey);
+      await invalidateClientConfigCache(client.apiKey);
       logger.info(`API key regenerated for client: ${client.name}`);
 
       res.json({
@@ -359,6 +373,7 @@ router.patch(
       await client.save();
 
       await clearClientsCache();
+      await invalidateClientConfigCache(client.apiKey);
       logger.info(`Client ${client.enabled ? "enabled" : "disabled"}: ${client.name}`);
 
       res.json({

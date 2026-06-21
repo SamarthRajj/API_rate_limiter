@@ -1,0 +1,24 @@
+{
+  "baseUrl": "http://localhost:5000",
+  "apiPath": "/api/data",
+  "seed": {
+    "clientCount": 500,
+    "perMinuteLimit": 10000,
+    "perDayLimit": 1000000,
+    "batchSize": 50
+  },
+  "stress": {
+    "connections": 100,
+    "durationSeconds": 30,
+    "pipelining": 10,
+    "targetRps": 1500,
+    "apiKeyEnv": "BENCHMARK_API_KEY"
+  },
+  "simulator": {
+    "durationSeconds": 60,
+    "pattern": "stress",
+    "concurrency": 20,
+    "configFile": "../simulator/clients_config.json"
+  },
+  "outputDir": "./results"
+}

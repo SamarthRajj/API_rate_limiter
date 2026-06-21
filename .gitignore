@@ -68,4 +68,7 @@ pip-delete-this-directory.txt
 *.patch
 *.tgz
 
-FIXES_SUMMARY.md
+# Benchmark results (keep sample report)
+benchmarks/results/*
+!benchmarks/results/sample-latest.md
+benchmarks/node_modules/
