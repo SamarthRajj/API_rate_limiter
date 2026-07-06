@@ -1,3 +1,5 @@
+import { jest } from "@jest/globals";
+import Client from "../models/Client.js";
 import {
   cacheClientConfig,
   clientConfigKey,
@@ -62,5 +64,23 @@ describe("clientConfigCache", () => {
       perMinuteLimit: 10,
       enabled: true,
     });
+  });
+
+  test("clientConfigKey uses stable prefix format", () => {
+    expect(clientConfigKey("abc123")).toBe("client:config:abc123");
+  });
+
+  test("resolveClientConfig loads from MongoDB on cache miss and caches result", async () => {
+    const findOneSpy = jest.spyOn(Client, "findOne").mockResolvedValue(sampleClient);
+
+    const config = await resolveClientConfig(redis, sampleClient.apiKey);
+
+    expect(findOneSpy).toHaveBeenCalledWith({ apiKey: sampleClient.apiKey });
+    expect(config).toMatchObject({ name: "TestClient", perMinuteLimit: 10 });
+    expect(await getCachedClientConfig(redis, sampleClient.apiKey)).toMatchObject({
+      name: "TestClient",
+    });
+
+    findOneSpy.mockRestore();
   });
 });

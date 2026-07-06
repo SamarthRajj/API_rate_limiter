@@ -2,26 +2,27 @@ import fs from "fs/promises";
 import path from "path";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import { captureEnvironment, getOutputDir, loadConfig } from "./helpers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const configPath = path.join(__dirname, "config.json");
-const config = JSON.parse(await fs.readFile(configPath, "utf8"));
-const outputDir = path.resolve(__dirname, config.outputDir);
+const config = await loadConfig();
+const outputDir = getOutputDir(config);
 
 await fs.mkdir(outputDir, { recursive: true });
 
 const suiteStartedAt = new Date().toISOString();
 const suiteResults = {
   startedAt: suiteStartedAt,
+  environment: await captureEnvironment(),
   steps: [],
 };
 
 function runNodeScript(scriptName) {
   return new Promise((resolve, reject) => {
-    const child = spawn("node", [path.join(__dirname, scriptName)], {
+    const scriptPath = path.join(__dirname, scriptName);
+    const child = spawn(process.execPath, [scriptPath], {
       stdio: "inherit",
       env: process.env,
-      shell: process.platform === "win32",
     });
 
     child.on("close", (code) => {
@@ -34,27 +35,33 @@ function runNodeScript(scriptName) {
   });
 }
 
-function runSimulator() {
+function runSimulator(configFile, stepConfig) {
   return new Promise((resolve, reject) => {
     const simulatorPath = path.resolve(__dirname, "../simulator/simulator_load.py");
     const outputFile = path.join(outputDir, `simulator-${Date.now()}.json`);
     const args = [
       simulatorPath,
       "--config-file",
-      path.resolve(__dirname, config.simulator.configFile),
+      path.resolve(outputDir, configFile),
       "--duration",
-      String(config.simulator.durationSeconds),
+      String(stepConfig.durationSeconds),
       "--pattern",
-      config.simulator.pattern,
+      stepConfig.pattern,
       "--concurrency",
-      String(config.simulator.concurrency),
+      String(stepConfig.concurrency),
       "--output",
       outputFile,
+      "--scenario",
+      stepConfig.scenario || "multi-client",
     ];
 
     const child = spawn("python", args, {
       stdio: "inherit",
-      shell: process.platform === "win32",
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+      },
     });
 
     child.on("close", (code) => {
@@ -70,17 +77,33 @@ function runSimulator() {
 console.log("=== Rate Limiter Benchmark Suite ===\n");
 
 try {
-  console.log("Step 1/3: Seeding clients...");
+  console.log("Step 1/5: Seeding clients...");
   await runNodeScript("seedClients.mjs");
   suiteResults.steps.push({ name: "seedClients", status: "completed" });
 
-  console.log("\nStep 2/3: Running autocannon stress test...");
+  console.log("\nStep 2/5: Running throughput benchmark (autocannon)...");
   await runNodeScript("stress.mjs");
-  suiteResults.steps.push({ name: "stress", status: "completed" });
+  suiteResults.steps.push({ name: "throughput", status: "completed" });
 
-  console.log("\nStep 3/3: Running Python simulator...");
-  const simulatorOutput = await runSimulator();
-  suiteResults.steps.push({ name: "simulator", status: "completed", output: simulatorOutput });
+  console.log("\nStep 3/5: Running latency benchmark (200-only)...");
+  await runNodeScript("latency.mjs");
+  suiteResults.steps.push({ name: "latency", status: "completed" });
+
+  console.log("\nStep 4/5: Generating 500-client simulator config...");
+  await runNodeScript("generateSimulatorConfig.mjs");
+  suiteResults.steps.push({ name: "generateSimulatorConfig", status: "completed" });
+
+  console.log("\nStep 5/5: Running 500-client multi-tenant simulator...");
+  const simulatorOutput = await runSimulator(config.multiClient.configFileName, {
+    ...config.multiClient,
+    scenario: "multi-tenant-500",
+  });
+  suiteResults.steps.push({
+    name: "multiClientSimulator",
+    status: "completed",
+    output: simulatorOutput,
+    clientCount: config.multiClient.clientCount,
+  });
 } catch (error) {
   suiteResults.error = error.message;
   console.error(`\nBenchmark suite failed: ${error.message}`);
@@ -92,4 +115,9 @@ await fs.writeFile(suiteFile, JSON.stringify(suiteResults, null, 2));
 
 console.log(`\nSuite metadata saved to ${suiteFile}`);
 console.log("Generating report...");
-await runNodeScript("generateReport.mjs");
+try {
+  await runNodeScript("generateReport.mjs");
+} catch (error) {
+  console.error(`Report generation failed: ${error.message}`);
+  process.exitCode = 1;
+}

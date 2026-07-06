@@ -51,6 +51,7 @@ class ClientSimulator(threading.Thread):
         self.blocked = 0
         self.total = 0
         self.latencies = []
+        self.allowed_latencies = []
         self.stop_event = threading.Event()
         self.start_time = None
         
@@ -135,6 +136,7 @@ class ClientSimulator(threading.Thread):
             
             if r.status_code == 200:
                 self.allowed += 1
+                self.allowed_latencies.append(latency)
                 if self.verbose:
                     print(f"{Fore.GREEN}[{self.config['name']}] ✓ Allowed ({latency:.1f}ms)")
             elif r.status_code == 429:
@@ -227,7 +229,7 @@ class ProgressReporter(threading.Thread):
             # Progress bar
             bar_length = 40
             filled = int(bar_length * percent / 100)
-            bar = '█' * filled + '░' * (bar_length - filled)
+            bar = '#' * filled + '-' * (bar_length - filled)
             
             # Print progress
             line = (f"{Fore.CYAN}{bar} {Style.BRIGHT}{percent:3d}%{Style.RESET_ALL} | "
@@ -247,11 +249,11 @@ class ProgressReporter(threading.Thread):
         self.stop_event.set()
 
 
-def aggregate_percentiles(threads):
+def aggregate_percentiles(threads, latency_attr='latencies'):
     """Compute aggregate latency percentiles across all clients"""
     all_latencies = []
     for thread in threads:
-        all_latencies.extend(thread.latencies)
+        all_latencies.extend(getattr(thread, latency_attr, []))
 
     if not all_latencies:
         return {
@@ -321,9 +323,10 @@ def print_summary(threads, duration):
     print("="*80)
 
 
-def export_results(threads, duration, output_file, format='csv'):
+def export_results(threads, duration, output_file, format='csv', scenario='default', active_client_count=None):
     """Export results to file"""
     aggregate = aggregate_percentiles(threads)
+    aggregate_allowed = aggregate_percentiles(threads, 'allowed_latencies')
 
     if format == 'csv':
         with open(output_file, 'w') as f:
@@ -348,8 +351,11 @@ def export_results(threads, duration, output_file, format='csv'):
         results = {
             'duration': duration,
             'timestamp': datetime.now().isoformat(),
+            'scenario': scenario,
+            'activeClientCount': active_client_count or len(threads),
             'clients': [thread.get_stats() for thread in threads],
             'aggregate': aggregate,
+            'aggregateAllowed': aggregate_allowed,
             'summary': {
                 'total': sum(t.total for t in threads),
                 'allowed': sum(t.allowed for t in threads),
@@ -400,6 +406,9 @@ def parse_arguments():
     
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output with per-request logging')
+
+    parser.add_argument('--scenario', type=str, default='default',
+                       help='Scenario label included in JSON export')
     
     return parser.parse_args()
 
@@ -408,9 +417,9 @@ def main():
     args = parse_arguments()
     
     # Print header
-    print(f"\n{Fore.CYAN}{Style.BRIGHT}╔════════════════════════════════════════════════════════════════╗")
-    print(f"║           Rate Limiter Load Simulator v2.0                    ║")
-    print(f"╚════════════════════════════════════════════════════════════════╝{Style.RESET_ALL}\n")
+    print(f"\n{Fore.CYAN}{Style.BRIGHT}{'=' * 64}")
+    print("           Rate Limiter Load Simulator v2.0")
+    print(f"{'=' * 64}{Style.RESET_ALL}\n")
     
     # Load client configuration
     if args.config_file:
@@ -489,7 +498,14 @@ def main():
     # Export results if requested
     if args.output:
         output_format = 'json' if args.output.endswith('.json') else 'csv'
-        export_results(threads, actual_duration, args.output, output_format)
+        export_results(
+            threads,
+            actual_duration,
+            args.output,
+            output_format,
+            scenario=args.scenario,
+            active_client_count=len(clients),
+        )
     
     print(f"\n{Fore.GREEN}{Style.BRIGHT}✓ Load test completed successfully!{Style.RESET_ALL}\n")
 

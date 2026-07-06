@@ -7,12 +7,29 @@
     "perDayLimit": 1000000,
     "batchSize": 50
   },
+  "throughputClient": {
+    "perMinuteLimit": 100000,
+    "perDayLimit": 10000000
+  },
   "stress": {
     "connections": 100,
     "durationSeconds": 30,
     "pipelining": 10,
     "targetRps": 1500,
+    "runs": 3,
     "apiKeyEnv": "BENCHMARK_API_KEY"
+  },
+  "latency": {
+    "durationSeconds": 60,
+    "targetRps": 80
+  },
+  "multiClient": {
+    "clientCount": 500,
+    "rpsPerClient": 1,
+    "durationSeconds": 120,
+    "pattern": "steady",
+    "concurrency": 5,
+    "configFileName": "simulator-500-config.json"
   },
   "simulator": {
     "durationSeconds": 60,

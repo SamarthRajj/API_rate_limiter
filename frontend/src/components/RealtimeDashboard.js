@@ -8,14 +8,35 @@ const API_BASE_URL = (process.env.REACT_APP_API_URL || "http://localhost:5000").
 const SOCKET_URL = API_BASE_URL;
 const USAGE_API = `${API_BASE_URL}/api/usage`;
 const DEMO_API = `${API_BASE_URL}/api/demo`;
+const DASHBOARD_CLIENT_LIMIT = 2;
+const SIMULATION_DURATION_MS = 120000;
+const SIMULATION_CYCLES = 2;
 
 const SIMULATION_CONFIGS = {
-  slow: { label: "Slow", rate: "2.5 req/s", count: 15, interval: 400 },
-  medium: { label: "Medium", rate: "7 req/s", count: 25, interval: 150 },
-  burst: { label: "Burst", rate: "20 req/s", count: 40, interval: 50 },
+  slow: { label: "Slow", loadMultiplier: 1 },
+  medium: { label: "Medium", loadMultiplier: 1.4 },
+  burst: { label: "Burst", loadMultiplier: 2 },
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function getSimulationPlan(mode, client) {
+  const config = SIMULATION_CONFIGS[mode];
+  if (!config) return null;
+
+  const perMinuteLimit = Math.max(1, Number(client?.perMinuteLimit) || 5);
+  const requestsPerCycle = Math.max(1, Math.ceil(perMinuteLimit * config.loadMultiplier));
+  const count = requestsPerCycle * SIMULATION_CYCLES;
+  const interval = count > 1 ? Math.round(SIMULATION_DURATION_MS / (count - 1)) : SIMULATION_DURATION_MS;
+
+  return {
+    ...config,
+    count,
+    interval,
+    requestsPerCycle,
+    rate: `${requestsPerCycle} req/min`,
+  };
+}
 
 function nowLabel() {
   return new Date().toLocaleTimeString();
@@ -66,6 +87,7 @@ export default function RealtimeDashboard() {
   const [series, setSeries] = useState({}); // per-client time series: { apiKey: [{tsLabel, allowed, blocked, total}] }
   const socketRef = useRef(null);
   const usingDemoRef = useRef(false);
+  const chartsRef = useRef(null);
   const [usingDemo, setUsingDemo] = useState(false);
   const [selectedApiKey, setSelectedApiKey] = useState("");
   const [simulating, setSimulating] = useState(false);
@@ -170,7 +192,7 @@ export default function RealtimeDashboard() {
       return;
     }
 
-    const enabledClients = clients.filter(c => c.enabled !== false && c.apiKey);
+    const enabledClients = clients.slice(0, DASHBOARD_CLIENT_LIMIT).filter(c => c.enabled !== false && c.apiKey);
     if (enabledClients.length === 0) {
       setSelectedApiKey("");
       return;
@@ -239,14 +261,19 @@ export default function RealtimeDashboard() {
   };
 
   const runSimulation = async (mode) => {
-    const config = SIMULATION_CONFIGS[mode];
-    const client = clients.find(c => c.apiKey === selectedApiKey) || clients.find(c => c.enabled !== false && c.apiKey);
+    const eligibleClients = clients.slice(0, DASHBOARD_CLIENT_LIMIT).filter(c => c.enabled !== false && c.apiKey);
+    const client = eligibleClients.find(c => c.apiKey === selectedApiKey) || eligibleClients[0];
+    const config = client ? getSimulationPlan(mode, client) : null;
 
     if (!config || !client || usingDemo || simulating) return;
 
     setSimulating(true);
     setSimulationMode(mode);
     setSimLog([]);
+
+    window.setTimeout(() => {
+      chartsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 150);
 
     const log = [];
 
@@ -308,8 +335,8 @@ export default function RealtimeDashboard() {
     });
     
     const arr = Object.values(buckets).sort((a, b) => a.ts - b.ts);
-    // keep last 30 seconds for better visualization
-    if (arr.length > 30) return arr.slice(arr.length - 30);
+    // Keep enough history to show both one-minute rate-limit cycles.
+    if (arr.length > 120) return arr.slice(arr.length - 120);
     return arr;
   };
 
@@ -331,60 +358,17 @@ export default function RealtimeDashboard() {
     });
   };
 
-  const realClients = usingDemo ? [] : clients.filter(c => c.enabled !== false && c.apiKey);
+  const visibleClients = clients.slice(0, DASHBOARD_CLIENT_LIMIT);
+  const realClients = usingDemo ? [] : visibleClients.filter(c => c.enabled !== false && c.apiKey);
   const selectedClient = realClients.find(c => c.apiKey === selectedApiKey) || realClients[0];
+  const slowPlan = getSimulationPlan("slow", selectedClient);
+  const mediumPlan = getSimulationPlan("medium", selectedClient);
+  const burstPlan = getSimulationPlan("burst", selectedClient);
   const passedCount = simLog.filter(entry => entry.passed).length;
   const blockedCount = simLog.filter(entry => !entry.passed).length;
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
-      {/* Getting real-time data note */}
-      <div className={`rounded-lg shadow-md p-6 mb-8 border ${usingDemo ? "bg-amber-50 border-amber-200" : "bg-blue-50 border-blue-200"}`}>
-        <div className="flex items-start gap-3">
-          <AlertCircle className={`w-6 h-6 mt-0.5 ${usingDemo ? "text-amber-700" : "text-blue-700"}`} />
-          <div className="flex-1">
-            <h2 className="text-lg font-semibold text-gray-900">
-              {usingDemo ? "Demo data shown (static)" : "Live data (real-time)"}
-            </h2>
-            <p className="text-sm text-gray-700 mt-1">
-              To get real-time analysis in your own deployment, clone the project and run the backend API yourself (or point the frontend to a test API).
-              Then run the simulator from your local PC to generate traffic.
-            </p>
-
-            <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <div className="bg-white/70 rounded-md border border-gray-200 p-4">
-                <div className="text-sm font-semibold text-gray-900 mb-2">Test API Keys (from `simulator/clients_config.json`)</div>
-                <div className="text-xs text-gray-700 font-mono space-y-1">
-                  <div>AppA: 68f1e0aced2e2209642f6406</div>
-                  <div>new2: bc175c9efc2d2b80f4a989a54f2e3e27</div>
-                </div>
-              </div>
-
-              <div className="bg-white/70 rounded-md border border-gray-200 p-4">
-                <div className="text-sm font-semibold text-gray-900 mb-2">Run simulation (local)</div>
-                <div className="text-xs text-gray-700 font-mono">
-                  python simulator/simulator_load.py --api-keys 68f1e0aced2e2209642f6406 --duration 120 --pattern steady
-                </div>
-                <div className="text-xs text-gray-600 mt-2">
-                  If you’re using a test API base URL, pass it like: <span className="font-mono">--base-url https://YOUR_TEST_API/api/data</span>
-                </div>
-              </div>
-
-              <div className="bg-white/70 rounded-md border border-gray-200 p-4 lg:col-span-2">
-                <div className="text-sm font-semibold text-gray-900 mb-2">Admin panel (create custom API keys)</div>
-                <div className="text-xs text-gray-700">
-                  Use the Admin tab to create custom API keys and limits for testing real-time rate limiting.
-                </div>
-                <div className="text-xs text-gray-700 font-mono mt-2 space-y-1">
-                  <div>username: admin</div>
-                  <div>password: admin123</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* Browser traffic simulator */}
       <div className="bg-white rounded-lg shadow-md border border-gray-200 p-6 mb-8">
         <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5">
@@ -394,7 +378,7 @@ export default function RealtimeDashboard() {
               <h2 className="text-lg font-semibold text-gray-900">Live Demo - Simulate Traffic</h2>
             </div>
             <p className="text-sm text-gray-600 mt-1">
-              Fires real requests at <span className="font-mono">{DEMO_API}</span> with the selected client key.
+              Runs real requests for two minute-long limiter cycles with the selected client key.
             </p>
           </div>
 
@@ -431,7 +415,7 @@ export default function RealtimeDashboard() {
           >
             <span>
               <span className="block text-sm font-semibold text-green-900">Slow</span>
-              <span className="block text-xs text-green-700">{SIMULATION_CONFIGS.slow.count} requests at {SIMULATION_CONFIGS.slow.rate}</span>
+              <span className="block text-xs text-green-700">{slowPlan.count} requests at {slowPlan.rate}</span>
             </span>
             {simulating && simulationMode === "slow" ? (
               <Loader2 className="w-5 h-5 text-green-700 animate-spin" aria-hidden="true" />
@@ -448,7 +432,7 @@ export default function RealtimeDashboard() {
           >
             <span>
               <span className="block text-sm font-semibold text-yellow-900">Medium</span>
-              <span className="block text-xs text-yellow-700">{SIMULATION_CONFIGS.medium.count} requests at {SIMULATION_CONFIGS.medium.rate}</span>
+              <span className="block text-xs text-yellow-700">{mediumPlan.count} requests at {mediumPlan.rate}</span>
             </span>
             {simulating && simulationMode === "medium" ? (
               <Loader2 className="w-5 h-5 text-yellow-700 animate-spin" aria-hidden="true" />
@@ -465,7 +449,7 @@ export default function RealtimeDashboard() {
           >
             <span>
               <span className="block text-sm font-semibold text-red-900">Burst</span>
-              <span className="block text-xs text-red-700">{SIMULATION_CONFIGS.burst.count} requests at {SIMULATION_CONFIGS.burst.rate}</span>
+              <span className="block text-xs text-red-700">{burstPlan.count} requests at {burstPlan.rate}</span>
             </span>
             {simulating && simulationMode === "burst" ? (
               <Loader2 className="w-5 h-5 text-red-700 animate-spin" aria-hidden="true" />
@@ -519,7 +503,7 @@ export default function RealtimeDashboard() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-gray-600">Active Clients</p>
-              <p className="text-3xl font-bold text-gray-900">{clients.length}</p>
+              <p className="text-3xl font-bold text-gray-900">{visibleClients.length}</p>
             </div>
             <Users className="w-10 h-10 text-primary-600" />
           </div>
@@ -530,7 +514,7 @@ export default function RealtimeDashboard() {
             <div>
               <p className="text-sm text-gray-600">Total Requests (Current Minute)</p>
               <p className="text-3xl font-bold text-gray-900">
-                {clients.reduce((sum, c) => sum + (c.minuteCount || 0), 0)}
+                {visibleClients.reduce((sum, c) => sum + (c.minuteCount || 0), 0)}
               </p>
             </div>
             <Activity className="w-10 h-10 text-green-600" />
@@ -542,7 +526,7 @@ export default function RealtimeDashboard() {
             <div>
               <p className="text-sm text-gray-600">Total Requests Today</p>
               <p className="text-3xl font-bold text-gray-900">
-                {clients.reduce((sum, c) => sum + (c.dayCount || 0), 0)}
+                {visibleClients.reduce((sum, c) => sum + (c.dayCount || 0), 0)}
               </p>
             </div>
             <TrendingUp className="w-10 h-10 text-blue-600" />
@@ -554,7 +538,7 @@ export default function RealtimeDashboard() {
             <div>
               <p className="text-sm text-gray-600">Blocked Today</p>
               <p className="text-3xl font-bold text-gray-900">
-                {clients.reduce((sum, c) => sum + (c.blockedCount || 0), 0)}
+                {visibleClients.reduce((sum, c) => sum + (c.blockedCount || 0), 0)}
               </p>
             </div>
             <AlertCircle className="w-10 h-10 text-red-600" />
@@ -567,11 +551,6 @@ export default function RealtimeDashboard() {
         <div className="px-6 py-4 border-b border-gray-200">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold text-gray-900">Clients Overview</h2>
-            {usingDemo && (
-              <span className="text-xs font-semibold px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
-                Demo snapshot
-              </span>
-            )}
           </div>
         </div>
         <div className="overflow-x-auto">
@@ -587,7 +566,7 @@ export default function RealtimeDashboard() {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {clients.map(c => {
+              {visibleClients.map(c => {
                 const minutePercentage = ((c.minuteCount || 0) / c.perMinuteLimit) * 100;
                 const dayPercentage = ((c.dayCount || 0) / c.perDayLimit) * 100;
                 const isWarning = dayPercentage >= 80;
@@ -652,10 +631,12 @@ export default function RealtimeDashboard() {
       </div>
 
       {/* Real-time Charts for Each Client */}
-      <div className="space-y-8">
-        {clients.map(c => {
+      <div ref={chartsRef} className="space-y-8 scroll-mt-6">
+        {visibleClients.map(c => {
           const perSecond = buildPerSecondData(c.apiKey);
           const cumulative = buildCumulativeData(c.apiKey);
+          const axisInterval = Math.max(0, Math.ceil(perSecond.length / 8));
+          const cumulativeAxisInterval = Math.max(0, Math.ceil(cumulative.length / 8));
           const perSecondLimit = (c.perMinuteLimit || 0) / 60;
           const perDayLimit = c.perDayLimit || 0;
           const cumulativeWithOverlay = cumulative.map(d => ({
@@ -675,7 +656,7 @@ export default function RealtimeDashboard() {
                   <ResponsiveContainer width="100%" height={300}>
                     <BarChart data={perSecond}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="tsLabel" angle={-45} textAnchor="end" height={80} fontSize={10} />
+                      <XAxis dataKey="tsLabel" angle={-45} textAnchor="end" height={80} fontSize={10} interval={axisInterval} />
                       <YAxis />
                       <Tooltip />
                       <Legend />
@@ -694,7 +675,7 @@ export default function RealtimeDashboard() {
                   <ResponsiveContainer width="100%" height={300}>
                     <AreaChart data={cumulativeWithOverlay}>
                       <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="tsLabel" angle={-45} textAnchor="end" height={80} fontSize={10} />
+                      <XAxis dataKey="tsLabel" angle={-45} textAnchor="end" height={80} fontSize={10} interval={cumulativeAxisInterval} />
                       <YAxis />
                       <Tooltip />
                       <Legend />

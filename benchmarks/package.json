@@ -6,6 +6,8 @@
   "scripts": {
     "seed": "node seedClients.mjs",
     "stress": "node stress.mjs",
+    "latency": "node latency.mjs",
+    "gen-config": "node generateSimulatorConfig.mjs",
     "suite": "node run-suite.mjs",
     "report": "node generateReport.mjs"
   },

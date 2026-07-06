@@ -17,6 +17,14 @@ const clientConfig = {
   enabled: true,
 };
 
+const boundaryConfig = {
+  name: "BoundaryTest",
+  apiKey: "boundary-key",
+  perMinuteLimit: 10,
+  perDayLimit: 100,
+  enabled: true,
+};
+
 describe("rateLimiter", () => {
   let redis;
   let app;
@@ -86,5 +94,62 @@ describe("rateLimiter", () => {
     expect(res.statusCode).toBe(429);
     expect(res.body.message).toBe("Rate limit exceeded");
     expect(next).not.toHaveBeenCalled();
+  });
+
+  test("blocks when day limit exceeded", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await redis.set(`count:limit-key:d:${today}`, "10");
+
+    const req = createMockReq(app, "limit-key");
+    const res = createMockRes();
+
+    await middleware(req, res, next);
+
+    expect(res.statusCode).toBe(429);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test("does not increment counters when blocked", async () => {
+    const minuteWindow = Math.floor(Date.now() / 60000);
+    const today = new Date().toISOString().slice(0, 10);
+    await redis.set(`count:limit-key:m:${minuteWindow}`, "2");
+    await redis.set(`count:limit-key:d:${today}`, "5");
+
+    const req = createMockReq(app, "limit-key");
+    const res = createMockRes();
+
+    await middleware(req, res, next);
+
+    expect(res.statusCode).toBe(429);
+    expect(await redis.get(`count:limit-key:m:${minuteWindow}`)).toBe("2");
+    expect(await redis.get(`count:limit-key:d:${today}`)).toBe("5");
+  });
+
+  test("allows request at exact minute boundary", async () => {
+    await cacheClientConfig(redis, boundaryConfig);
+    const minuteWindow = Math.floor(Date.now() / 60000);
+    await redis.set(`count:boundary-key:m:${minuteWindow}`, "9");
+
+    const req = createMockReq(app, "boundary-key");
+    const res = createMockRes();
+
+    await middleware(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(await redis.get(`count:boundary-key:m:${minuteWindow}`)).toBe("10");
+  });
+
+  test("blocks request one over minute boundary", async () => {
+    await cacheClientConfig(redis, boundaryConfig);
+    const minuteWindow = Math.floor(Date.now() / 60000);
+    await redis.set(`count:boundary-key:m:${minuteWindow}`, "10");
+
+    const req = createMockReq(app, "boundary-key");
+    const res = createMockRes();
+
+    await middleware(req, res, next);
+
+    expect(res.statusCode).toBe(429);
+    expect(await redis.get(`count:boundary-key:m:${minuteWindow}`)).toBe("10");
   });
 });
